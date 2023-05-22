@@ -1,0 +1,82 @@
+function [Xout, Sout, k, noJumpOut] = JumpMap(X, S, Kin, Hu, Hp, Q, R, rho, uMax, measuremedOutputs, ConsumptionEst, noPVInv, PVIndex, noJump)
+%UNTITLED4 Summary of this function goes here
+%   Detailed explanation goes here
+
+    % Run MPC
+    if (mod(noJump,2) == 0 && Kin > 1)
+        % Linearise
+        [Vout, SLin, Sensitivity, J] = NewRapV2(S);
+        B = Sensitivity(:,PVIndex);
+        A = eye(14);
+        ref = ones(14,1) - Vout(15:end);
+        Vlin = Vout(15:end);
+    
+        % Calculate next predicted consumption change
+        dV = zeros(28,1);
+        k = Kin;
+        if (k <= 96)
+            dS = (measuremedOutputs(:,k) - measuremedOutputs(:,k-1));
+            dV = J\dS;
+            Sout = S + dS;
+        end
+    
+        %MPC
+        uopt = sdpvar(noPVInv, Hu);
+        control = sdpvar(noPVInv, Hp);
+        duopt = sdpvar(noPVInv, Hp);
+        slack = sdpvar(2,Hp);
+        constraints = [];
+        objective = 0;
+    
+        xopt = X(1:14) - Vlin;
+        % This loop iterates over the entire prediction horizon
+        for j = 1:Hp
+            if (j <= Hu) % Checks if we are below our control horizon
+                control(:,j) = uopt(:,j);
+            else
+                control(:,j) = uopt(:,end);
+            end
+            if (j == 1)
+                duopt(:,j) = control(:,j) - X(15:15+noPVInv-1);
+            else
+                duopt(:,j) = control(:,j) - control(:,j-1);
+            end
+            if (j == 1 && ConsumptionEst == true)
+                xopt = A * xopt + B * duopt(:,j) + dV(15:end);
+            else
+                xopt = A * xopt + B * duopt(:,j);
+            end
+            objective = objective + (xopt-ref).' * Q *(xopt-ref) + duopt(:,j).'* R *duopt(:,j) +  rho*(slack(1,j) + slack(2,j));
+            constraints = [constraints,  0.95 + slack(1,j) <= Vlin+xopt <= 1.05+ slack(2,j)];
+        end
+        ops = sdpsettings('solver','sedumi');
+        ops.verbose = 0; % makes yalmip quiet
+        % solving the problem
+        optimize([constraints, slack >= 0, abs(uopt) <= uMax],objective, ops);
+        
+    %     Xout(15:17) = uopt(:,1);
+        %duPlot(:,i) = duopt(:,1);
+                   
+        %update sample
+        du = double(duopt(:,1));
+        vNew = X(1:14) + B*du + dV(15:end);
+        
+        Xout = [vNew; uopt(:,1); X(end)+1];
+    elseif (noJump > 0)
+        % Increment period
+        [Vout, SLin, Sensitivity, J] = NewRapV2(S);
+        dV = zeros(28,1);
+        k = Kin+1;
+        if (k <= 96)
+            dS = (measuremedOutputs(:,k) - measuremedOutputs(:,k-1));
+            dV = J\dS;
+            Sout = S + dS;
+        end
+        vNew = X(1:14) + dV(15:end);
+        
+        Xout = [vNew; X(15:15+noPVInv-1); 1];
+    else
+        Xout = [vNew; uopt(:,1); X(end)+1];
+    end
+    noJumpOut = noJump + 1;
+end
